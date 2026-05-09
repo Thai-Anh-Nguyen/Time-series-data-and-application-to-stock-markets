@@ -1,0 +1,59 @@
+# ── Data ────────────────────────────────────────────────────────────────────
+# Raw data directories (large; unzip locally from the .zip archives)
+data_nasdaq_csv/
+data-vn-20230228/
+
+# Zip archives (binary blobs, re-downloadable)
+*.zip
+
+# ── Models ───────────────────────────────────────────────────────────────────
+models/
+*.h5
+*.keras
+*.pt
+*.pth
+*.ckpt
+*.ckpt.*
+*.index
+*.data-*-of-*
+checkpoint
+saved_model/
+
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.env
+*.log
+mlruns/
+wandb/
