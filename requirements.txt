@@ -1,0 +1,15 @@
+# Core ML
+tensorflow>=2.15
+scikit-learn>=1.4
+
+# Data
+pandas>=2.1
+numpy>=1.26
+
+# Visualization
+matplotlib>=3.8
+seaborn>=0.13
+
+# Notebook
+jupyter>=1.0
+ipykernel>=6.0

@@ -6,22 +6,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CS313 Deep Learning for AI final project (Spring 2026). Applies deep learning to time-series financial data for stock market analysis and prediction across Nasdaq and Vietnamese markets.
 
+## Reusable Modules (`src/`)
+
+- `src/preprocessing.py` — `load_nasdaq`, `load_vietnam`, `make_windows`, `make_multi_step_windows`, `chronological_split`, `normalize_windows`, `denormalize`
+- `src/features.py` — `ohlcv_array`, `add_returns`, `add_moving_averages`, `add_rsi`, `add_bollinger_bands`, `build_vn_feature_matrix`, `make_classification_labels`
+- `src/evaluation.py` — `regression_report`, `classification_report`, `portfolio_report`, `print_report`
+
+Saved model weights go in `models/`.
+
 ## Running the Notebook
 
 ```bash
-jupyter notebook notebook.ipynb
+jupyter notebook 240039-project-notebook.ipynb
 ```
 
 ## Data
 
-**Nasdaq data** (`data_nasdaq_csv/csv/`): ~2000+ tickers, CSV format with columns `Date, Low, Open, Volume, High, Close, Adjusted Close`.
+**Nasdaq data** (`Nasdaq data/csv/`): 1564 tickers, CSV format with columns `Date, Low, Open, Volume, High, Close, Adjusted Close`.
 
-**Vietnam data** (`data-vn-20230228/`):
-- `stock-historical-data/` — per-ticker CSVs with `Open, High, Low, Close, Volume, TradingDate`
+**Vietnam data** (`Vietnam data/`):
+- `stock-historical-data/` — per-ticker CSVs (1629 tickers) with `Open, High, Low, Close, Volume, TradingDate`
 - `financial-ratio/` — per-ticker financial ratios (P/E, ROE, ROA, etc.)
 - `industry-analysis/` — sector/industry metrics per ticker
-- `ticker-overview.csv` — ~1629 tickers with exchange, industry, company metadata
+- `dividend-history/` — per-ticker dividend history
+- `ticker-overview.csv` — 1629 tickers with exchange, industry, company metadata
 - `companies.csv` — company details
+- `crawl-vn-data.ipynb` — data collection notebook
+
+**Assignment spec**: `Final-project-DL4AI.pdf`
 
 **Reference implementation**: `sample-code-APPL/sample-code-APPL/final-project-sample-code.ipynb` — end-to-end AAPL prediction using Conv1D with windowing, per-sample MinMax normalization, and MSE evaluation.
 
