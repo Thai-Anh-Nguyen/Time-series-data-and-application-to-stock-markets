@@ -15,6 +15,7 @@ Quick links: [variable namespace map](Local%20variable.yml) · [checkpoints fold
 | `# TASK 1` → `1.1 Multiple-feature extension` | [§1.1 Multiple-feature next-day forecast (AAPL)](#11-multiple-feature-next-day-forecast) |
 | `### 1.1 extension — apply the same pipeline to MSFT and NVDA` | [§1.1.h Multi-ticker extension](#11h-multi-ticker-extension) |
 | `1.2 kᵗʰ day forecast` | [§1.2 kᵗʰ-day-ahead forecast](#12-kᵗʰ-day-ahead-forecast) |
+| `1.3 k consecutive days forecast` | [§1.3 k consecutive days forecast](#13-k-consecutive-days-forecast) |
 
 ---
 
@@ -43,7 +44,14 @@ models/
 │   ├── AAPL_lstm.keras
 │   ├── MSFT_lstm.keras
 │   └── NVDA_lstm.keras
-└── task1.2/
+├── task1.2/
+│   ├── AAPL_k3.keras
+│   ├── AAPL_k7.keras
+│   ├── MSFT_k3.keras
+│   ├── MSFT_k7.keras
+│   ├── NVDA_k3.keras
+│   └── NVDA_k7.keras
+└── task1.3/
     ├── AAPL_k3.keras
     ├── AAPL_k7.keras
     ├── MSFT_k3.keras
@@ -283,6 +291,93 @@ dates          = feat_aapl['Date'].iloc[test_start_idx + label_offset
 
 ---
 
+## 1.3 k consecutive days forecast
+
+**Goal (from the spec):** instead of predicting a *single* future day, predict the **next k days as a sequence**. For k = 3 the model outputs `[day+1, day+2, day+3]`; for k = 7 it outputs `[day+1, …, day+7]`.
+
+### 1.3.a What changes vs 1.2
+
+The 1.2 pipeline produces a **scalar** label (the kᵗʰ future day). 1.3 produces a **length-k vector** label (all k future days). Everything else is held fixed so any change in error is a function of the new label structure, not of hyperparameters:
+
+| Component | 1.2 | 1.3 |
+|---|---|---|
+| Label | scalar `label[i + window_size + k − 1]` | vector `label[i + window_size : i + window_size + k]`, shape `(k,)` |
+| Model head | `Dense(1)` | `Dense(k)` |
+| Loss | MSE on scalar | MSE on vector (Keras averages over `k` automatically) |
+| Norm/denorm | per-window MinMax (Adj Close min/max) | **same** stats, broadcast across the k label components |
+| Window count per ticker | `len(arr) − window_size − k + 1` | identical |
+| Train/val/test ratios | 70 / 15 / 15, chronological | identical |
+
+The new helpers live in cell `99e59430`:
+
+- `MultiStepSplit` — namedtuple like `Split`, but `.y` has shape `(N, k)`.
+- `build_pipeline_multistep(df, name, k, ...)` — windowed features + vector labels + per-window MinMax (using the input window's Adj Close min/max for *all* k components, so denormalisation needs only one `(label_min, label_max)` pair per window).
+- `build_lstm_multistep(input_shape, k)` — same `LSTM(64)` trunk, but `Dense(k)` head.
+- `denormalize_label_multistep(y_norm, label_min, label_max)` — invert MinMax for `(N, k)` predictions.
+- `evaluate_test_multistep(model, test)` — returns `(y_real (N,k), y_pred (N,k), metrics_dict)` with both aggregate metrics and **per-step RMSE/MAE** arrays of length k.
+
+### 1.3.b Training loop
+
+Same shape as 1.2's loop, just calling the multi-step pipeline and head:
+
+```python
+results_kday = {}
+for ticker in TICKERS:
+    for k in K_VALUES:                                          # [3, 7]
+        tr, va, te = build_pipeline_multistep(RAW_FRAMES[ticker], ..., k=k)
+        model = build_lstm_multistep(tr.X.shape[1:], k=k)
+        hist  = train_with_checkpoint(
+            model, tr, va,
+            save_path=checkpoint_path('task1.3', f'{ticker}_k{k}'),
+        )
+        model = load_model(checkpoint_path('task1.3', f'{ticker}_k{k}'))
+        results_kday[(ticker, k)] = {'model': model, 'history': hist,
+                                     'train': tr, 'val': va, 'test': te}
+```
+
+`results_kday` uses the same `(ticker, k)` tuple convention as `results_kth` — kept separate so 1.2 and 1.3 don't trample each other's models.
+
+### 1.3.c Per-step error growth (table)
+
+The single most useful artifact in 1.3 is the **per-step RMSE/MAE** array. The aggregate-over-all-steps RMSE (which the table also reports) mixes near and far horizons together; the per-step breakdown shows the error *growth curve* directly:
+
+```
+[AAPL  k=7]  MSE(norm)=…  RMSE($)=…  MAE($)=…
+              step:        1        2        3        4        5        6        7
+              RMSE:    a.aaa    b.bbb    c.ccc    d.ddd    e.eee    f.fff    g.ggg
+              MAE :    …
+```
+
+Typical pattern (numbers vary between runs since we don't seed):
+
+- step-1 RMSE is in the same ballpark as 1.2's k=1 baseline for the same ticker.
+- step-k RMSE is in the same ballpark as 1.2's k=k single-day forecast.
+- Intermediate steps interpolate, usually slightly above a straight line — error grows fastest at the start and tapers (relative to a baseline of "we already know roughly where prices will be"). This is the right shape to report.
+
+The aggregate `MSE (norm)` column remains the only cross-ticker-comparable metric.
+
+### 1.3.d Plotting on real dates (AAPL only — the trajectory plot)
+
+1.3 introduces a genuinely new visual dimension: the **forecast trajectory itself**. 1.1 plots a single horizon over many dates; 1.2 plots a single horizon (per k) over many dates; 1.3 can plot a **full k-day predicted path** from a single starting date.
+
+The plot picks six evenly-spaced starting indices in the AAPL k=7 test set and draws the 7 predicted Adj Close values against the realised 7. Date arithmetic:
+
+```python
+test_start_idx     = r['train'].X.shape[0] + r['val'].X.shape[0]
+first_label_offset = window_size                 # the *first* of the k predicted days
+for idx in sample_indices:
+    base = test_start_idx + first_label_offset + idx
+    dates = feat_aapl['Date'].iloc[base : base + k]
+    ax.plot(dates, y_real[idx], ...)             # y_real[idx] has shape (k,)
+    ax.plot(dates, y_pred[idx], ...)
+```
+
+Note: `first_label_offset = window_size` (no `+ k − 1`), because the *first* predicted day is `window_size` rows after the start of that window. The `+ k − 1` offset only applies when locating the kᵗʰ day (as in 1.2's plot).
+
+MSFT and NVDA are intentionally not plotted — the per-step table already shows their cross-ticker behaviour, and the trajectory-vs-realised picture is qualitatively the same shape, just at different price levels.
+
+---
+
 ## Reusable helpers — quick reference
 
 | Function | Defined in cell | Used by |
@@ -294,6 +389,10 @@ dates          = feat_aapl['Date'].iloc[test_start_idx + label_offset
 | `train_with_checkpoint(model, train, val, save_path, ...)` | checkpoint utilities | every training cell — wraps `model.fit` with `ModelCheckpoint` |
 | `build_lstm(input_shape)` | 1.1 extension | 1.1 MSFT/NVDA training, 1.2 training loop |
 | `evaluate_test(model, test)` | 1.1 extension | 1.1 cross-ticker table, 1.2 comparison table & AAPL plot |
+| `build_pipeline_multistep(df, name, k, ...)` | 1.3 helpers | 1.3 training loop |
+| `build_lstm_multistep(input_shape, k)` | 1.3 helpers | 1.3 training loop |
+| `denormalize_label_multistep(...)` | 1.3 helpers | `evaluate_test_multistep` |
+| `evaluate_test_multistep(model, test)` | 1.3 helpers | 1.3 per-step table & AAPL trajectory plot |
 
 For the full list of variable names (split shapes, dict keys, helper signatures, every checkpoint path) see [Local variable.yml](Local%20variable.yml).
 
@@ -308,7 +407,9 @@ For the full list of variable names (split shapes, dict keys, helper signatures,
 - **Reload after checkpointing.** Every training cell calls `train_with_checkpoint(...)` and then `model = load_model(...)`. The reload is **not optional** — without it, `model` is the **last-epoch** weights, but the checkpoint on disk is the **best-by-val-loss** weights. Skipping the reload means downstream evaluation cells use a different model than the one persisted to disk.
 - **Dict-key conventions:**
   - `results_k1[ticker]` — string key, holds the k=1 model and its train/val/test.
-  - `results_kth[(ticker, k)]` — tuple key, holds the 1.2 models. The two dicts are kept separate (rather than merged into one giant `results[(ticker, k)]` with k ∈ {1, 3, 7}) so that 1.1 stays self-contained.
-- **Don't rename load-bearing variables.** `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `MODELS_DIR` are all referenced by later cells. Renaming them silently will break downstream evaluation/plotting cells. See [Local variable.yml](Local%20variable.yml) for the full list.
+  - `results_kth[(ticker, k)]` — tuple key, holds 1.2's single-day-ahead models. `.y` is scalar.
+  - `results_kday[(ticker, k)]` — tuple key, holds 1.3's multi-step models. `.y` is a vector of length k. The three dicts are kept separate (rather than merged) so each task stays self-contained.
+- **1.3 plot offset.** The 1.3 trajectory plot's date offset is `test_start_idx + window_size` (the **first** of the k predicted days). Do **not** add `+ k − 1` — that's the offset for 1.2's plot, which targets only the **kᵗʰ** day.
+- **Don't rename load-bearing variables.** `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `results_kday`, `MODELS_DIR` are all referenced by later cells. Renaming them silently will break downstream evaluation/plotting cells. See [Local variable.yml](Local%20variable.yml) for the full list.
 - **Date offset for plotting test labels:** `test_start_idx + window_size + k − 1`, where `test_start_idx = N_train + N_val`. Use the **per-(ticker, k) pipeline's own** train/val sizes (from `results_kth[(ticker, k)]['train']` and `['val']`), not the 1.1 split sizes — total windows shrink slightly as k grows.
 - **No redundant per-ticker plots.** The notebook only plots predicted-vs-real for AAPL — MSFT and NVDA appear only in the comparison tables. This is deliberate: tables convey "how well did each ticker do", and adding the same plot N times only pads the report without adding insight.
