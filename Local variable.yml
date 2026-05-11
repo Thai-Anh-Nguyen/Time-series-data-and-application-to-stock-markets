@@ -40,6 +40,14 @@ constants:
   VN_DATA_DIR:
     value: "Path('Vietnam data/stock-historical-data')"
     defined_in: "Task 2.1 (Vietnam loading cell)"
+  SIGNAL_HORIZON:
+    value: 5
+    defined_in: "Task 3 helpers cell"
+    note: "Task 3 forward-window length in trading days — used by both 3.1 (buy) and 3.2 (sell)."
+  SIGNAL_THRESHOLD:
+    value: 0.02
+    defined_in: "Task 3 helpers cell"
+    note: "Task 3 fractional-return cutoff (|Close[t+h]/Close[t] − 1| > τ → positive class)."
 
 raw_dataframes:           # loaded straight from Nasdaq data/csv/<ticker>.csv
   AAPL:    {rows: 10590, defined_in: "cell 7ed3d11b"}
@@ -101,6 +109,36 @@ splits:                   # output of build_pipeline → Split(X, y, label_min, 
       VNM: "train (2949, 30, 12)  val (632, 30, 12)  test (633, 30, 12)"
       MSN: "train (2290, 30, 12)  val (491, 30, 12)  test (491, 30, 12)"
       MWG: "train (1474, 30, 12)  val (316, 30, 12)  test (317, 30, 12)"
+
+  # Task 3 — classification splits. Same shape as VN_SPLITS_K1 minus a few windows
+  # (horizon=5 instead of 1 → `len(arr) − window_size − horizon + 1` shrinks by 4 per ticker).
+  # Returned by build_pipeline_classification; not stored in a global dict — read via
+  # results_vn_buy[t]['train'].X.shape (and ditto for results_vn_sell).
+  VN_CLF_SPLIT_SIZES:
+    type: "documentation only — actual splits live in results_vn_buy / results_vn_sell"
+    defined_in: "Task 3 (build_pipeline_classification, horizon=5)"
+    sizes:
+      VCB: "train (2351, 30, 12)  val (504, 30, 12)  test (504, 30, 12)"
+      HPG: "train (2627, 30, 12)  val (564, 30, 12)  test (564, 30, 12)"
+      FPT: "train (2788, 30, 12)  val (598, 30, 12)  test (598, 30, 12)"
+      VNM: "train (2946, 30, 12)  val (632, 30, 12)  test (632, 30, 12)"
+      MSN: "train (2286, 30, 12)  val (491, 30, 12)  test (491, 30, 12)"
+      MWG: "train (1471, 30, 12)  val (316, 30, 12)  test (316, 30, 12)"
+    note: "Identical sizes for buy and sell — direction only changes label values, not window counts."
+    pos_rate_buy:
+      VCB: 0.307
+      HPG: 0.357
+      FPT: 0.296
+      VNM: 0.270
+      MSN: 0.307
+      MWG: 0.352
+    pos_rate_sell:
+      VCB: 0.268
+      HPG: 0.305
+      FPT: 0.255
+      VNM: 0.218
+      MSN: 0.285
+      MWG: 0.255
 
 models:                   # all checkpointed under models/<task>/<name>.keras
   # Task 1.1 — k = 1

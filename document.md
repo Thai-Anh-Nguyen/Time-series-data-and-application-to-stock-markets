@@ -19,6 +19,8 @@ Quick links: [variable namespace map](Local%20variable.yml) · [checkpoints fold
 | `# TASK 2` → `2.1 Vietnam multi-feature next-day forecast` | [§2.1 Vietnam next-day forecast (6 tickers)](#21-vietnam-next-day-forecast) |
 | `2.2 Vietnam kᵗʰ day forecast` | [§2.2 Vietnam kᵗʰ-day-ahead forecast](#22-vietnam-kᵗʰ-day-ahead-forecast) |
 | `2.3 Vietnam k consecutive days forecast` | [§2.3 Vietnam k consecutive days forecast](#23-vietnam-k-consecutive-days-forecast) |
+| `# TASK 3` → `3.1 Buying signal identification` | [§3.1 Buy signal (binary classification)](#31-buy-signal) |
+| `3.2 Selling signal identification` | [§3.2 Sell signal (binary classification)](#32-sell-signal) |
 
 ---
 
@@ -449,6 +451,116 @@ VCB k = 7 gets a six-panel trajectory plot at evenly-spaced starting dates from 
 
 ---
 
+## 3.1 Buy signal
+
+**Goal (from the spec):** build a model that outputs a probability / score suggesting *now* is a good time to enter. Justify the labelling and model design. The PDF specifically asks whether manual rule-based features (SMA / MACD / RSI crossovers) should drive the labels.
+
+### 3.1.a Label scheme — future-return threshold
+
+Window ending at day *t* is positive (label = 1) iff
+
+```
+Close[t + h] / Close[t] − 1 > +τ
+```
+
+with `h = 5` (one trading week) and `τ = 0.02` (2 % move). The model's sigmoid output is the **probability of a 5-day-forward 2 % up-move**.
+
+Why this scheme and not a rule-based label:
+
+- **Rule-derived labels** (e.g., MACD crosses above signal *and* RSI < 70) reduce the task to imitating the rule. The DL classifier would learn the rule, with no value over running the rule directly.
+- **Triple-barrier** (López de Prado: upper barrier `+τ` hit before lower barrier `−τ` within `h` days) is a defensible alternative — captures stop-loss / take-profit asymmetry. We mention it as an alternative in the report but stick with the fixed-horizon scheme so 3.1 and 3.2 read as clean mirrors.
+- **Future-return thresholds** let the model discover *which* features (the same SMA/MACD/RSI we already include as **inputs**) actually predict the move.
+
+`(h, τ) = (5, 0.02)` was chosen so the positive class is roughly 30–50 % on the six tickers — frequent enough that the model can't degenerate to "always predict 0", rare enough that the task isn't trivial. Positive-rate survey on the full series:
+
+| Ticker | Rows | Buy + % |
+|---|---:|---:|
+| VCB | 3 388 | 30.7 % |
+| HPG | 3 784 | 35.7 % |
+| FPT | 4 013 | 29.6 % |
+| VNM | 4 239 | 27.0 % |
+| MSN | 3 297 | 30.7 % |
+| MWG | 2 132 | 35.2 % |
+
+### 3.1.b Pipeline reuse vs Task 2
+
+Everything below the label-generation step is identical to Task 2:
+
+| Component | Task 2 (regression) | Task 3 (classification) |
+|---|---|---|
+| Input window | 30 days × 12 features (`VN_FEATURE_COLS`) | identical |
+| Per-window MinMax of inputs | yes | identical |
+| Chronological 70 / 15 / 15 split | yes (`shuffle=False`) | identical |
+| Label | scalar Close at `t+horizon`, MinMax-normalised | scalar 0 / 1, **not normalised** |
+| Trunk | `LSTM(64)` | identical |
+| Head | `Dense(1)` linear | `Dense(1, sigmoid)` |
+| Regularisation | none | `Dropout(0.2)` between LSTM and head |
+| Loss | MSE | binary cross-entropy |
+| Metrics | MSE / RMSE / MAE | Accuracy / Precision / Recall / F1 / ROC-AUC |
+| Checkpoints | `models/task2.*/` | `models/task3.1/<TICKER>_buy.keras` |
+
+The new helpers live in the Task 3 helpers cell:
+
+- `ClfSplit` — namedtuple like `Split`, with `.X` and `.y` only (no `label_min` / `label_max` — labels are 0/1, no denormalisation needed).
+- `make_signal_labels(close, horizon, threshold, direction)` — vectorised label generator. NaN-pads the last `horizon` rows; pipeline drops them via the `len(arr) − window_size − horizon + 1` window cap.
+- `build_pipeline_classification(df, name, horizon, threshold, direction, ...)` — Task 2 pipeline with classification labels. Accepts the same `feature_cols=` / `label_col=` kwargs as `build_pipeline`.
+- `build_lstm_classifier(input_shape)` — `LSTM(64) → Dropout(0.2) → Dense(1, sigmoid)`, BCE loss, Adam optimiser. Built-in metrics `[accuracy, AUC, Precision, Recall]` for per-epoch monitoring.
+- `tune_decision_threshold(model, val_split, grid=None)` — sweeps `θ ∈ {0.05, …, 0.95}` on the val split, returns the θ that maximises F1 (ties broken by precision).
+- `evaluate_test_clf(model, test_split, decision_threshold)` — predicts → applies θ → returns `(y_true, y_prob, y_pred, metrics)`. Metrics include AUC (`nan` if a class is missing) and the 2×2 confusion matrix.
+
+### 3.1.c Why `Dropout(0.2)` (the one architectural difference)
+
+Classification on noisy financial data overfits much faster than regression — a regression head has to hit the right *price*; a classification head only has to be on the right side of the decision boundary. Adding `Dropout(0.2)` between `LSTM(64)` and the sigmoid keeps the model from memorising the small Vietnam training sets (the smallest, MWG, has only 1 471 train windows). All other knobs (Adam, 10 epochs, batch 64) stay the same.
+
+### 3.1.d Decision-threshold tuning on val (not 0.5)
+
+A sigmoid output is a probability — turning it into a 0 / 1 decision needs a cutoff. We **don't fix θ = 0.5**. Instead:
+
+1. After training, predict probabilities on the val set.
+2. Sweep `θ ∈ {0.05, 0.10, …, 0.95}` (19 candidates).
+3. Pick the θ that maximises **F1 on val** (ties broken by precision).
+4. Apply that θ on the test set for the final metrics.
+
+This makes the model **robust to class imbalance** without changing the loss function — different tickers naturally end up with different θ, reflecting their different positive-class rates. Storing θ in `results_vn_buy[t]['threshold']` keeps every downstream cell self-contained: any plot or metric re-derivation uses the same θ that was tuned during training.
+
+### 3.1.e Metrics
+
+For a buy signal, **precision** matters most — false positives = buying into a flat or losing trade — so a model that runs lean on `pred+` and high on precision is preferred even at the cost of some recall. The report table includes all four classification metrics plus ROC-AUC (a threshold-independent ranking quality metric), the test-set positive rate (`pos`), the fraction the model decides to buy (`pred+`), and the tuned θ.
+
+VCB gets two diagnostic plots — confusion matrix at the tuned θ, and ROC curve with the operating point marked. Other tickers stay in the table (same "no redundant per-ticker plots" rule as Task 1 / 2).
+
+---
+
+## 3.2 Sell signal
+
+Mirror of 3.1 with the label flipped: positive iff `Close[t + 5] / Close[t] − 1 < −0.02`. Same `h = 5`, same `τ = 0.02`, same model architecture, same threshold-tuning protocol.
+
+### 3.2.a Why two independent models, not one 3-class softmax
+
+The buy and sell models are kept **separate** (rather than a softmax over `{sell, hold, buy}`) for two reasons:
+
+1. The spec explicitly asks for two subtasks with two scores — one per direction.
+2. Buy and sell aren't strictly mutually exclusive in a noisy market. There are days where the next 5 days neither rise > 2 % nor fall < −2 % *and* days where neither model fires — the implicit "hold" regime. A 3-class softmax would force the model to commit to one of three labels; two independent sigmoids let the asset stay in a non-decision regime when no signal is strong.
+
+### 3.2.b Positive-class survey
+
+Sell positive rate is generally lower than buy — Vietnamese equities historically drift upward (long-run positive return), so down-moves of ≥ 2 % over 5 days are rarer than up-moves of the same magnitude. Numbers from the full series:
+
+| Ticker | Buy + % | Sell + % |
+|---|---:|---:|
+| VCB | 30.7 % | 26.8 % |
+| HPG | 35.7 % | 30.5 % |
+| FPT | 29.6 % | 25.5 % |
+| VNM | 27.0 % | 21.8 % |
+| MSN | 30.7 % | 28.5 % |
+| MWG | 35.2 % | 25.5 % |
+
+### 3.2.c Metric emphasis differs vs 3.1
+
+For a sell signal, **recall matters more than in 3.1** — missing a sell signal means holding through a drawdown, which is asymmetrically costly in a long-only portfolio (you keep paying for the position to fall). The threshold-tuner still maximises F1 (a recall/precision balance), but when reading the table, prefer tickers with high *recall* over those with high *precision* if both reach similar F1. Same plot artefacts as 3.1 (VCB CM + ROC, red palette).
+
+---
+
 ## Reusable helpers — quick reference
 
 | Function | Defined in cell | Used by |
@@ -465,6 +577,12 @@ VCB k = 7 gets a six-panel trajectory plot at evenly-spaced starting dates from 
 | `denormalize_label_multistep(...)` | 1.3 helpers | `evaluate_test_multistep` |
 | `evaluate_test_multistep(model, test)` | 1.3 helpers | 1.3 / 2.3 per-step tables & AAPL / VCB trajectory plots |
 | `load_vietnam(ticker)` | 2.1 (Vietnam loading) | builds the 6 entries of `VN_RAW_FRAMES`; drops the leading unnamed index column, renames `TradingDate → Date`, parses dates |
+| `ClfSplit` (namedtuple) | 3.1 helpers | classification analogue of `Split` — `.X`, `.y` only |
+| `make_signal_labels(close, horizon, threshold, direction)` | 3.1 helpers | 1 if `Close[t+h]/Close[t]-1 > +τ` (buy) or `< -τ` (sell); NaN-padded last `h` rows |
+| `build_pipeline_classification(df, name, horizon=5, threshold=0.02, direction='buy', ..., feature_cols=None, label_col=None)` | 3.1 helpers | Task 2 pipeline with 0/1 labels — used by 3.1 and 3.2 training loops |
+| `build_lstm_classifier(input_shape)` | 3.1 helpers | `LSTM(64) → Dropout(0.2) → Dense(1, sigmoid)`, BCE loss, Adam |
+| `tune_decision_threshold(model, val_split, grid=None)` | 3.1 helpers | sweeps θ on val, returns the θ maximising F1 (ties broken by precision) |
+| `evaluate_test_clf(model, test_split, decision_threshold)` | 3.1 helpers | predict → apply θ → return `(y_true, y_prob, y_pred, metrics)` with AUC + CM |
 
 For the full list of variable names (split shapes, dict keys, helper signatures, every checkpoint path) see [Local variable.yml](Local%20variable.yml).
 
@@ -482,9 +600,14 @@ For the full list of variable names (split shapes, dict keys, helper signatures,
   - `results_kth[(ticker, k)]` — tuple key, holds Nasdaq 1.2's single-day-ahead models. `.y` is scalar.
   - `results_kday[(ticker, k)]` — tuple key, holds Nasdaq 1.3's multi-step models. `.y` is a vector of length k.
   - `results_vn_k1[ticker]` / `results_vn_kth[(ticker, k)]` / `results_vn_kday[(ticker, k)]` — Vietnam mirrors of the above. The six dicts are kept separate (rather than merged) so each task stays self-contained — a Vietnam ticker name colliding with a Nasdaq one (e.g., none do today, but they could) wouldn't be ambiguous.
+  - `results_vn_buy[ticker]` / `results_vn_sell[ticker]` — Task 3 buy / sell signal classifiers. Each value has the standard `{model, history, train, val, test}` keys **plus a `threshold`** field — the val-tuned decision θ used to convert sigmoid output to a 0 / 1 buy/sell call. Whenever you re-evaluate one of these models downstream, **use the stored θ**, not 0.5.
 - **1.3 plot offset.** The 1.3 trajectory plot's date offset is `test_start_idx + window_size` (the **first** of the k predicted days). Do **not** add `+ k − 1` — that's the offset for 1.2's plot, which targets only the **kᵗʰ** day.
 - **Don't rename load-bearing variables.** Task 1: `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `results_kday`, `MODELS_DIR`. Task 2: `VN_TICKERS`, `VN_DATA_DIR`, `VN_FEATURE_COLS`, `VN_LABEL_COL`, `VN_RAW_FRAMES`, `VN_SPLITS_K1`, `feat_vcb`, `results_vn_k1`, `results_vn_kth`, `results_vn_kday`. All are referenced by later cells. See [Local variable.yml](Local%20variable.yml) for the full list.
 - **Date offset for plotting test labels:** `test_start_idx + window_size + k − 1`, where `test_start_idx = N_train + N_val`. Use the **per-(ticker, k) pipeline's own** train/val sizes (from `results_kth[(ticker, k)]['train']` / `results_vn_kth[(ticker, k)]['train']` and `['val']`), not the 2.1 / 1.1 split sizes — total windows shrink slightly as k grows.
 - **No redundant per-ticker plots.** Task 1 plots predicted-vs-real for AAPL only; Task 2 for VCB only. The other tickers appear in the comparison tables. Tables convey "how well did each ticker do"; mirroring the same plot N times pads the report without adding insight.
 - **Vietnam vs Nasdaq pipeline parity.** The pipeline helpers `build_pipeline` and `build_pipeline_multistep` accept optional `feature_cols=` / `label_col=` kwargs. When `None` (Task 1 call sites), they default to the Nasdaq globals (`FEATURE_COLS` / `LABEL_COL`). Task 2 call sites pass `VN_FEATURE_COLS` / `VN_LABEL_COL`. Don't drop these kwargs from Vietnam calls — silently using the Nasdaq globals would try to read an `Adjusted Close` column that doesn't exist on Vietnam frames and raise a KeyError mid-pipeline.
 - **VND vs $ metric labels.** `evaluate_test` / `evaluate_test_multistep` return dicts with keys named `'MSE ($²)'`, `'RMSE ($)'`, `'MAE ($)'`. These names are historical (from Task 1); the *values* are in whatever unit the label column uses (USD for Nasdaq, VND for Vietnam). The Task 2 print cells relabel them as VND in the table headers; don't try to "fix" the dict keys downstream — it would break Task 1 cells.
+- **Task 3 windowing has 4 fewer windows per ticker than Task 2.1.** The classification pipeline uses `last_valid = len(arr) − window_size − horizon + 1` with `horizon = 5`; Task 2.1's regression pipeline uses `horizon = 1`. So per ticker we lose `5 − 1 = 4` windows total (after the 70/15/15 split this shows up as ~2-3 fewer in each of train/val/test vs Task 2.1). Don't try to reuse the 2.1 `VN_SPLITS_K1` shapes for Task 3 — call `build_pipeline_classification` and read shapes from its return.
+- **Task 3 stores a per-ticker decision threshold.** `results_vn_buy[t]['threshold']` and `results_vn_sell[t]['threshold']` are the val-tuned θ. Always use them when calling `evaluate_test_clf` — `decision_threshold=0.5` will give different (usually worse) metrics, and any inconsistency between table and plot would be confusing.
+- **Different tickers get different θ.** That's by design — tickers with lower positive-class rates get lower θ. Don't try to enforce a global θ; the tuner per ticker is what makes the pipeline robust to class imbalance without adding a `class_weight` argument.
+- **Task 3 ROC-AUC may be `nan` if a class is missing in a test set.** `evaluate_test_clf` guards `roc_auc_score` against this `ValueError` — won't happen on our six tickers at h=5, τ=0.02 (positive rates 22–36 %), but keep the guard if you later sweep larger τ values where a small ticker's test set could end up all-zero.
