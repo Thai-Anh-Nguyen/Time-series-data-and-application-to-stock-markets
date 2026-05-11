@@ -1,6 +1,123 @@
-# dataset variable
-AAPL
-MSFT
-NVDA
+# Local variable namespace map for 240039-project-notebook.ipynb
+# ---------------------------------------------------------------
+# A grep-friendly reference for every important name defined by the notebook,
+# grouped by category and annotated with shape / dtype / where defined.
+# Keep this in sync when adding new tasks or models.
 
-# local variable
+constants:
+  FEATURE_COLS:
+    value: [Open, High, Low, Close, Volume, Adjusted Close,
+            daily_return, MA5, MA20, RSI, MACD, MACD_signal, volatility]
+    n: 13
+    defined_in: "cell 8151b94d (1.1)"
+    note: "Column order of the per-window feature tensor — must not change once windows are built."
+  LABEL_COL:
+    value: "Adjusted Close"
+    defined_in: "cell 8151b94d (1.1)"
+  TICKERS:
+    value: [AAPL, MSFT, NVDA]
+    defined_in: "cell 3a2b8653 (1.1 extension)"
+  K_VALUES:
+    value: [3, 7]
+    defined_in: "cell fd9e01f9 (1.2)"
+    note: "Forecast horizons used in 1.2 (k = 1 is handled by 1.1)."
+  MODELS_DIR:
+    value: "Path('models')"
+    defined_in: "cell 3f6164fb (checkpoint utilities)"
+
+raw_dataframes:           # loaded straight from Nasdaq data/csv/<ticker>.csv
+  AAPL:    {rows: 10590, defined_in: "cell 7ed3d11b"}
+  MSFT:    {rows:  9264, defined_in: "cell d070ee04"}
+  NVDA:    {rows:  6013, defined_in: "cell 6f7990ff"}
+  RAW_FRAMES:
+    type: "dict[str, DataFrame]"
+    keys: [AAPL, MSFT, NVDA]
+    defined_in: "cell fd9e01f9 (1.2)"
+
+feature_engineered_dataframes:  # output of add_technical_features(...).dropna()
+  feat_aapl:
+    cols: "raw + 7 engineered indicators + parsed Date"
+    defined_in: "cell 57c2ae6c (used by AAPL plot)"
+    used_by: ["1.1 AAPL plot", "1.2 AAPL plot"]
+  feat: "(local helper var in cell 25806c13 — split-boundary plot only)"
+
+splits:                   # output of build_pipeline → Split(X, y, label_min, label_max)
+  # k = 1 (Task 1.1)
+  AAPL_train: {shape: "(7378, 30, 13)", defined_in: "cell 63ec1fdb"}
+  AAPL_val:   {shape: "(1581, 30, 13)", defined_in: "cell 63ec1fdb"}
+  AAPL_test:  {shape: "(1581, 30, 13)", defined_in: "cell 63ec1fdb"}
+  MSFT_train: {shape: "(6449, 30, 13)", defined_in: "cell 63ec1fdb"}
+  MSFT_val:   {shape: "(1382, 30, 13)", defined_in: "cell 63ec1fdb"}
+  MSFT_test:  {shape: "(1383, 30, 13)", defined_in: "cell 63ec1fdb"}
+  NVDA_train: {shape: "(4173, 30, 13)", defined_in: "cell 63ec1fdb"}
+  NVDA_val:   {shape: " (895, 30, 13)", defined_in: "cell 63ec1fdb"}
+  NVDA_test:  {shape: " (895, 30, 13)", defined_in: "cell 63ec1fdb"}
+  SPLITS_K1:
+    type: "dict[str, (train, val, test)]"
+    defined_in: "cell 3a2b8653 (1.1 extension)"
+
+models:                   # all checkpointed under models/<task>/<name>.keras
+  # Task 1.1 — k = 1
+  AAPL_LSTM_model: {arch: "LSTM(64)→Dense(1)", defined_in: "cell 6cea4be6", ckpt: "models/task1.1/AAPL_lstm.keras"}
+  MSFT_LSTM_model: {arch: "LSTM(64)→Dense(1)", defined_in: "cell 3a2b8653", ckpt: "models/task1.1/MSFT_lstm.keras"}
+  NVDA_LSTM_model: {arch: "LSTM(64)→Dense(1)", defined_in: "cell 3a2b8653", ckpt: "models/task1.1/NVDA_lstm.keras"}
+
+  # All k = 1 results in one place (used by the 1.2 comparison table)
+  results_k1:
+    type: "dict[str, dict]"
+    key: "ticker"
+    fields: [model, history, train, val, test]
+    keys_present: [AAPL, MSFT, NVDA]
+    defined_in: "cell 3a2b8653"
+
+  # Task 1.2 — k ∈ {3, 7} × {AAPL, MSFT, NVDA}
+  results_kth:
+    type: "dict[tuple[str, int], dict]"
+    key: "(ticker, k)"
+    fields: [model, history, train, val, test]
+    keys_present:
+      - "('AAPL', 3)"
+      - "('AAPL', 7)"
+      - "('MSFT', 3)"
+      - "('MSFT', 7)"
+      - "('NVDA', 3)"
+      - "('NVDA', 7)"
+    defined_in: "cell fd9e01f9"
+    ckpt_pattern: "models/task1.2/<TICKER>_k<k>.keras"
+
+histories:
+  history:
+    type: "tf.keras.callbacks.History"
+    refers_to: "AAPL k=1 training (cell 6cea4be6)"
+    used_by: "training-curve plot (cell 8f054cbc)"
+
+helpers:                  # function-name → defined_in
+  add_technical_features:  "cell 6ce09c79"
+  build_pipeline:          "cell 8151b94d"
+  denormalize_label:       "cell 8151b94d"
+  Split (namedtuple):      "cell 8151b94d"
+  checkpoint_path:         "cell 3f6164fb"
+  train_with_checkpoint:   "cell 3f6164fb"
+  build_lstm:              "cell 3a2b8653 (1.1 extension; reused by 1.2)"
+  evaluate_test:           "cell 3a2b8653 (1.1 extension; reused by 1.2)"
+
+checkpoint_paths:         # everything that gets written to disk during a full notebook run
+  task1.1:
+    - models/task1.1/AAPL_lstm.keras
+    - models/task1.1/MSFT_lstm.keras
+    - models/task1.1/NVDA_lstm.keras
+  task1.2:
+    - models/task1.2/AAPL_k3.keras
+    - models/task1.2/AAPL_k7.keras
+    - models/task1.2/MSFT_k3.keras
+    - models/task1.2/MSFT_k7.keras
+    - models/task1.2/NVDA_k3.keras
+    - models/task1.2/NVDA_k7.keras
+
+# Debugging cheat-sheet
+# --------------------
+# - To inspect any split:    AAPL_train.X.shape  /  results_kth[('MSFT', 7)]['train'].X.shape
+# - To reload any model:     load_model('models/task1.2/NVDA_k3.keras')
+# - To re-score any model:   evaluate_test(model, split)  → (y_real, y_pred, metrics)
+# - To find label dates:     feat_aapl['Date'].iloc[N_train + N_val + window_size + k - 1 : ...]
+# - All splits use:          window_size=30, val_ratio=0.15, test_ratio=0.15, shuffle=False
