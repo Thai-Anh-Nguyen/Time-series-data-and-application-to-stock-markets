@@ -237,6 +237,31 @@ models:                   # all checkpointed under models/<task>/<name>.keras
     ckpt_pattern: "models/task2.3/<TICKER>_k<k>.keras"
     note: "Splits are MultiStepSplit (y has shape (N, k)). Models output a length-k vector."
 
+  # Task 3.1 — buy-signal classifiers, one per Vietnam ticker.
+  # arch: LSTM(64) → Dropout(0.2) → Dense(1, sigmoid); loss = binary_crossentropy.
+  results_vn_buy:
+    type: "dict[str, dict]"
+    key: "ticker"
+    fields: [model, history, train, val, test, threshold]
+    keys_present: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 3.1 (training loop cell)"
+    ckpt_pattern: "models/task3.1/<TICKER>_buy.keras"
+    note: |
+      `train`/`val`/`test` are ClfSplit namedtuples (.X, .y only — no label_min/label_max
+      since 0/1 labels need no denormalisation). `threshold` is the val-tuned decision θ
+      that maximises F1 on val (ties broken by precision); always pass it to
+      evaluate_test_clf(...) downstream, not 0.5.
+
+  # Task 3.2 — sell-signal classifiers, mirror of 3.1.
+  results_vn_sell:
+    type: "dict[str, dict]"
+    key: "ticker"
+    fields: [model, history, train, val, test, threshold]
+    keys_present: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 3.2 (training loop cell)"
+    ckpt_pattern: "models/task3.2/<TICKER>_sell.keras"
+    note: "Same structure as results_vn_buy. Direction='sell' flips the label condition."
+
 histories:
   history:
     type: "tf.keras.callbacks.History"
@@ -258,6 +283,12 @@ helpers:                  # function-name → defined_in
   denormalize_label_multistep:   "cell 99e59430 (1.3; reused by 2.3)"
   evaluate_test_multistep:       "cell 99e59430 (1.3; reused by 2.3)"
   load_vietnam:                  "Task 2.1 (Vietnam loading cell) — drops leading unnamed index column, renames TradingDate → Date, parses dates."
+  ClfSplit (namedtuple):         "Task 3 helpers cell — fields (X, y); classification analogue of Split (no label_min/label_max)."
+  make_signal_labels:            "Task 3 helpers cell — signature: (close, horizon, threshold, direction). Returns int8 0/1 array length len(close), with the last `horizon` rows NaN-padded → dropped by the pipeline's window cap."
+  build_pipeline_classification: "Task 3 helpers cell — signature: (df, name, horizon=5, threshold=0.02, direction='buy', window_size=30, val_ratio=0.15, test_ratio=0.15, verbose=True, feature_cols=None, label_col=None). Defaults to Nasdaq globals; Task 3 always passes VN_FEATURE_COLS / VN_LABEL_COL."
+  build_lstm_classifier:         "Task 3 helpers cell — LSTM(64) → Dropout(0.2) → Dense(1, sigmoid); BCE loss; built-in metrics [accuracy, AUC, Precision, Recall]."
+  tune_decision_threshold:       "Task 3 helpers cell — signature: (model, val_split, grid=None). Sweeps θ ∈ {0.05, …, 0.95} (default), returns θ maximising F1 (ties broken by precision)."
+  evaluate_test_clf:             "Task 3 helpers cell — signature: (model, test_split, decision_threshold=0.5). Returns (y_true, y_prob, y_pred, metrics) with keys Accuracy, Precision, Recall, F1, ROC-AUC, threshold, pos_rate, pred_pos, CM."
 
 checkpoint_paths:         # everything that gets written to disk during a full notebook run
   task1.1:
@@ -311,6 +342,20 @@ checkpoint_paths:         # everything that gets written to disk during a full n
     - models/task2.3/MSN_k7.keras
     - models/task2.3/MWG_k3.keras
     - models/task2.3/MWG_k7.keras
+  task3.1:
+    - models/task3.1/VCB_buy.keras
+    - models/task3.1/HPG_buy.keras
+    - models/task3.1/FPT_buy.keras
+    - models/task3.1/VNM_buy.keras
+    - models/task3.1/MSN_buy.keras
+    - models/task3.1/MWG_buy.keras
+  task3.2:
+    - models/task3.2/VCB_sell.keras
+    - models/task3.2/HPG_sell.keras
+    - models/task3.2/FPT_sell.keras
+    - models/task3.2/VNM_sell.keras
+    - models/task3.2/MSN_sell.keras
+    - models/task3.2/MWG_sell.keras
 
 # Debugging cheat-sheet
 # --------------------
@@ -319,3 +364,6 @@ checkpoint_paths:         # everything that gets written to disk during a full n
 # - To re-score any model:   evaluate_test(model, split)  → (y_real, y_pred, metrics)
 # - To find label dates:     feat_aapl['Date'].iloc[N_train + N_val + window_size + k - 1 : ...]
 # - All splits use:          window_size=30, val_ratio=0.15, test_ratio=0.15, shuffle=False
+# - To re-score a Task 3 model with stored θ:
+#       r = results_vn_buy['VCB']                   # or results_vn_sell[...]
+#       evaluate_test_clf(r['model'], r['test'], decision_threshold=r['threshold'])
