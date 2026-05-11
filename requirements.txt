@@ -5,6 +5,7 @@ scikit-learn>=1.4
 # Data
 pandas>=2.1
 numpy>=1.26
+scipy>=1.11
 
 # Visualization
 matplotlib>=3.8

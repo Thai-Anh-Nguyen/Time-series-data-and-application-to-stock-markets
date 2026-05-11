@@ -21,6 +21,9 @@ Quick links: [variable namespace map](Local%20variable.yml) · [checkpoints fold
 | `2.3 Vietnam k consecutive days forecast` | [§2.3 Vietnam k consecutive days forecast](#23-vietnam-k-consecutive-days-forecast) |
 | `# TASK 3` → `3.1 Buying signal identification` | [§3.1 Buy signal (binary classification)](#31-buy-signal) |
 | `3.2 Selling signal identification` | [§3.2 Sell signal (binary classification)](#32-sell-signal) |
+| `# TASK 4` → `4.1 Profitable stock selection` | [§4.1 Profitability score](#41-profitability-score) |
+| `4.2 Risk management` | [§4.2 Risk score (cross-sectional blend)](#42-risk-score) |
+| `4.3 Portfolio composition — prudent vs aggressive investor` | [§4.3 Portfolio composition & backtest](#43-portfolio-composition--backtest) |
 
 ---
 
@@ -561,6 +564,137 @@ For a sell signal, **recall matters more than in 3.1** — missing a sell signal
 
 ---
 
+## 4.1 Profitability score
+
+Task 4 trains **no new model**. The deep-learning core is in Task 2.3 and Task 3.2; Task 4 is an allocation + walk-forward backtest layer on top.
+
+### 4.1.a Expected-return definition
+
+For each `(ticker t, decision day d)` in the test window:
+
+`E[return]_t,d  =  pred_close_t(d + h) / close_t(d) − 1`,  with `h = 5`.
+
+`pred_close_t(d + h)` is the **5ᵗʰ step** of the Task 2.3 k=7 multistep LSTM for ticker `t`. We re-use `results_vn_kday[(t, 7)]` rather than training a dedicated h=5 head because:
+
+1. Step 5 lies strictly inside k=7's training horizon — no extrapolation past the loss-optimised range.
+2. Per-step RMSE tables in §2.3 already validated each step's error envelope, so we know what we're paying for.
+3. Avoiding a third LSTM keeps the deep-learning stack identical across Task 2 / Task 3 / Task 4 — one fewer thing to justify in the report.
+
+The denormalisation re-uses `denormalize_label_multistep` (per-window MinMax stored on `test.label_min` / `test.label_max`).
+
+### 4.1.b Aggregation columns
+
+The §4.1 table reports four numbers per ticker:
+
+| Column | Definition | What it tells you |
+|---|---|---|
+| `mean E[return]` | mean of `E[return]_t,d` over the test window | "Would I buy this on average?" — a signed level |
+| `mean realised` | mean of realised 5-day returns over the same days | ground truth; compares to the column above |
+| `hit rate` | fraction of days where `sign(E[return]) == sign(realised)` | directional accuracy — agnostic to magnitude |
+| `rank ρ` | Spearman correlation between `E[return]` and realised | does the model **rank** good days vs bad? |
+
+We rely on the **ranking** columns (hit rate, ρ) in §4.3, not the levels — Task 2's regression errors compound at h=5 enough that levels are noisier than the rank.
+
+### 4.1.c What we deliberately don't do
+
+- **No reranking with Task 3.1's P(buy).** The buy classifier already shares the same underlying input pipeline; adding it as a second profitability signal would double-count the same input variation. We keep them complementary: E[return] for §4.1 / §4.3 scoring, P(sell) for §4.2 / §4.3 risk.
+- **No per-ticker bias correction.** Some tickers' Task 2.3 model has a slight optimistic / pessimistic bias on the test window. We expose it in the table (`mean E[return]` vs `mean realised`) but don't centre it — doing so would bake in test-set knowledge.
+
+---
+
+## 4.2 Risk score
+
+Two complementary signals, blended into a single `[0, 1]` cross-sectional risk score per `(date, ticker)`:
+
+1. **Trailing 20-day realised volatility** of daily Close returns — classical "how much has this been moving lately?" risk. Computed on the full Close series; sliced at each decision day so it's trailing (no look-ahead).
+2. **P(sell) from the Task 3.2 LSTM** — a *learned* bearish-regime probability. Catches setups the rolling vol won't: small std but a steady downtrend, for example.
+
+### 4.2.a Why both signals
+
+A single risk axis would either over-penalise high-vol-but-flat names (vol-only) or miss broad-market drawdowns where every name has elevated vol but only some have a bearish setup (P(sell)-only). The two are correlated enough (~0.3–0.5 typically) to reinforce in clear cases but disagree often enough to be useful as independent dimensions.
+
+### 4.2.b Normalisation
+
+For each day `d` independently:
+
+1. Z-score each signal **across tickers**: `z_vol = (vol − vol.mean()) / vol.std()`, ditto for P(sell). Cross-sectional rather than across-time so the score is relative — at least one ticker is the safest and one the riskiest on every day.
+2. Average: `raw = 0.5·z_vol + 0.5·z_psell`.
+3. Min-max per row to `[0, 1]`: `risk = (raw − raw.min()) / (raw.max() − raw.min())`.
+
+The `0.5 / 0.5` blend is the default; this is the place to tune if a future experiment shows one signal dominates. We didn't sweep it — the qualitative story is robust to the blend and we wanted to keep the methodology simple to defend.
+
+### 4.2.c What the table shows
+
+Per ticker:
+
+- `mean vol` — average trailing 20-day vol on test days (in raw daily-return units, so values like `0.020` ≈ 2 % daily std)
+- `mean P(sell)` — average sell probability on test days
+- `mean risk` — the final `[0, 1]` score, averaged over days
+- `#riskiest` / `%riskiest` — how often the ticker was the **top-1** by daily risk score (this is the "would be excluded under K=1" frequency that §4.3's prudent profile cares about)
+
+---
+
+## 4.3 Portfolio composition & backtest
+
+### 4.3.a Single combined score
+
+Per `(date, ticker)`: `s = E[return] − λ · risk`.
+
+`λ` is the only "investor preference" knob. The score is then water-filled into weights (see 4.3.b). Negative scores are clipped to zero before normalisation — this is a **long-only** portfolio, so under-water names just get zero weight rather than going short.
+
+### 4.3.b Water-filling weights (`_row_weights`)
+
+For one day's score vector:
+
+1. Zero out excluded names (if any).
+2. Clip negatives to 0, normalise the remainder to sum to 1.
+3. **Water-fill the cap:** if any weight would exceed `weight_cap`, set those to `weight_cap` and re-distribute the leftover mass across the rest proportionally to score. Repeat until no remaining name exceeds the cap.
+
+Naive "clip & renormalise" loses mass when the redistribution can't proceed (e.g., remaining names already at cap). Water-filling always sums to 1 as long as `n_active · weight_cap ≥ 1`. With 6 tickers and `cap ∈ {0.25, 0.5}`, that holds with room to spare.
+
+### 4.3.c Prudent vs aggressive
+
+| Profile      | `λ` | Weight cap | Exclude top-K riskiest |
+|--------------|----:|-----------:|----------------------:|
+| Prudent      | 2.0 | 25 %       | 1                     |
+| Aggressive   | 0.5 | 50 %       | 0                     |
+
+`λ` is the dominant knob — it directly weighs return against risk inside the score. The weight cap is a secondary safety: prudent caps at 25 % so no single name dominates even if it scores well; aggressive allows up to 50 %. The hard exclusion (`K = 1`) on the prudent profile takes the day's riskiest name out of the universe entirely, on top of the soft `λ` penalty — belt-and-braces.
+
+Defaults are chosen, not learned. We did not sweep `(λ, cap, K)` on validation because:
+
+- The test universe is small (6 tickers), so a sweep would overfit fast.
+- Task 4's grading hinges on *methodology*, not on hitting a specific Sharpe target — fixed, defensible defaults beat a noisy "best on val" pick.
+
+### 4.3.d Backtest mechanics
+
+- Walk-forward on the **test** window only — train/val are never touched.
+- Rebalance every `h = 5` trading days; weights stay fixed in between (no continuous drift / no daily rebalancing — closer to a realistic strategy that costs trade execution).
+- NAV uses **raw daily** Close-to-Close returns, so Sharpe is annualised against true day-to-day vol. The `active` weights are forward-filled from rebalance days.
+- Benchmark: equal-weight portfolio on the same calendar / rebalance schedule, so differences come from scoring, not universe choice.
+
+### 4.3.e Metrics
+
+- **Annualised return** — `(NAV_final / NAV_start)^(252/n_days) − 1`
+- **Sharpe** (rf=0) — `√252 · mean(daily_returns) / std(daily_returns)`
+- **Max drawdown** — `min((NAV − running_max) / running_max)`
+
+The NAV plot is a single panel (prudent / aggressive / equal-weight) with final-value annotations. We deliberately don't plot one ticker at a time — the same "comparison-table-not-per-ticker-viz" rule from Task 2 / Task 3.
+
+### 4.3.f Look-ahead audit
+
+Everything is computed using only information available at the decision day:
+
+| Quantity | Source | Look-ahead? |
+|---|---|---|
+| `E[return]` | Task 2.3 LSTM (best epoch on train, by val_loss) | No — model has no knowledge of test |
+| `P(sell)` | Task 3.2 LSTM (best epoch on train, by val_loss) | No |
+| `rolling_vol` | trailing 20-day std of daily returns *up to and including* decision day | No |
+| `realized_h_return` | future close at `d+h` | **Used only to compute NAV during backtest**, never in scoring |
+| Daily returns for NAV | raw Close-to-Close | Used after weights are decided at rebalance day |
+
+---
+
 ## Reusable helpers — quick reference
 
 | Function | Defined in cell | Used by |
@@ -583,6 +717,17 @@ For a sell signal, **recall matters more than in 3.1** — missing a sell signal
 | `build_lstm_classifier(input_shape)` | 3.1 helpers | `LSTM(64) → Dropout(0.2) → Dense(1, sigmoid)`, BCE loss, Adam |
 | `tune_decision_threshold(model, val_split, grid=None)` | 3.1 helpers | sweeps θ on val, returns the θ maximising F1 (ties broken by precision) |
 | `evaluate_test_clf(model, test_split, decision_threshold)` | 3.1 helpers | predict → apply θ → return `(y_true, y_prob, y_pred, metrics)` with AUC + CM |
+| `predict_h_step_close(model, test_split, h)` | 4 helpers | one-pass predict + denormalise for the multistep LSTM, returns the h-step-ahead Close as a 1-D array |
+| `ticker_test_frame(ticker, h=5)` | 4 helpers | per-decision-day DataFrame on the test window: `Date, Close, e_return, realized_h_return, rolling_vol, p_sell` |
+| `build_test_panel()` | 4 helpers | `{ticker → ticker_test_frame(ticker)}` for every Vietnam ticker — used everywhere in §4 |
+| `compute_risk_panel(panel)` | 4 helpers | wide DataFrame `[date × ticker]` of risk scores in `[0, 1]`; cross-sectional z-blend of vol + P(sell), then row min-max |
+| `compute_score(e_return_wide, risk_wide, lam)` | 4 helpers | `E[return] − λ · risk`, indices preserved |
+| `_row_weights(score_row, exclude_set, weight_cap)` | 4 helpers | **water-filling** one day's weights — clips negatives, applies the cap, redistributes leftover mass; always sums to 1 if `cap·n_active ≥ 1` |
+| `build_weights(score_wide, risk_wide, weight_cap, exclude_top_k)` | 4 helpers | calls `_row_weights` per day; excludes the top-K riskiest names on each day if `exclude_top_k > 0` |
+| `equal_weights_like(score_wide)` | 4 helpers | equal-weight benchmark DataFrame, same index/columns |
+| `daily_returns_calendar(panel)` | 4 helpers | wide DataFrame `[date × ticker]` of raw daily Close-to-Close returns — used for NAV computation |
+| `backtest(weights, daily_returns, rebalance_every=5)` | 4 helpers | walk-forward backtest; rebalance every `h` decision days and keep weights fixed in between; returns `(nav, port_daily, active_weights)` |
+| `portfolio_metrics(nav, port_daily)` | 4 helpers | dict with `Annualised Return`, `Sharpe` (rf=0, 252 trading days), `Max Drawdown` |
 
 For the full list of variable names (split shapes, dict keys, helper signatures, every checkpoint path) see [Local variable.yml](Local%20variable.yml).
 
@@ -601,6 +746,9 @@ For the full list of variable names (split shapes, dict keys, helper signatures,
   - `results_kday[(ticker, k)]` — tuple key, holds Nasdaq 1.3's multi-step models. `.y` is a vector of length k.
   - `results_vn_k1[ticker]` / `results_vn_kth[(ticker, k)]` / `results_vn_kday[(ticker, k)]` — Vietnam mirrors of the above. The six dicts are kept separate (rather than merged) so each task stays self-contained — a Vietnam ticker name colliding with a Nasdaq one (e.g., none do today, but they could) wouldn't be ambiguous.
   - `results_vn_buy[ticker]` / `results_vn_sell[ticker]` — Task 3 buy / sell signal classifiers. Each value has the standard `{model, history, train, val, test}` keys **plus a `threshold`** field — the val-tuned decision θ used to convert sigmoid output to a 0 / 1 buy/sell call. Whenever you re-evaluate one of these models downstream, **use the stored θ**, not 0.5.
+  - `test_panel[ticker]` — Task 4's per-decision-day DataFrame on the test window (`Date, Close, e_return, realized_h_return, rolling_vol, p_sell`). Built by `build_test_panel()`; reused across §4.1 / §4.2 / §4.3.
+  - `risk_wide` — wide DataFrame `[date × ticker]` of cross-sectional risk scores in `[0, 1]`. Built once in §4.2 and re-used by §4.3's weight builder.
+  - `portfolio_results['prudent' | 'aggressive' | 'equal']` — Task 4 backtest outputs. Each entry has `{nav, returns, weights, metrics}`. NAV is a pandas Series indexed by daily dates; metrics has `Annualised Return`, `Sharpe`, `Max Drawdown`.
 - **1.3 plot offset.** The 1.3 trajectory plot's date offset is `test_start_idx + window_size` (the **first** of the k predicted days). Do **not** add `+ k − 1` — that's the offset for 1.2's plot, which targets only the **kᵗʰ** day.
 - **Don't rename load-bearing variables.** Task 1: `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `results_kday`, `MODELS_DIR`. Task 2: `VN_TICKERS`, `VN_DATA_DIR`, `VN_FEATURE_COLS`, `VN_LABEL_COL`, `VN_RAW_FRAMES`, `VN_SPLITS_K1`, `feat_vcb`, `results_vn_k1`, `results_vn_kth`, `results_vn_kday`. All are referenced by later cells. See [Local variable.yml](Local%20variable.yml) for the full list.
 - **Date offset for plotting test labels:** `test_start_idx + window_size + k − 1`, where `test_start_idx = N_train + N_val`. Use the **per-(ticker, k) pipeline's own** train/val sizes (from `results_kth[(ticker, k)]['train']` / `results_vn_kth[(ticker, k)]['train']` and `['val']`), not the 2.1 / 1.1 split sizes — total windows shrink slightly as k grows.
@@ -611,3 +759,9 @@ For the full list of variable names (split shapes, dict keys, helper signatures,
 - **Task 3 stores a per-ticker decision threshold.** `results_vn_buy[t]['threshold']` and `results_vn_sell[t]['threshold']` are the val-tuned θ. Always use them when calling `evaluate_test_clf` — `decision_threshold=0.5` will give different (usually worse) metrics, and any inconsistency between table and plot would be confusing.
 - **Different tickers get different θ.** That's by design — tickers with lower positive-class rates get lower θ. Don't try to enforce a global θ; the tuner per ticker is what makes the pipeline robust to class imbalance without adding a `class_weight` argument.
 - **Task 3 ROC-AUC may be `nan` if a class is missing in a test set.** `evaluate_test_clf` guards `roc_auc_score` against this `ValueError` — won't happen on our six tickers at h=5, τ=0.02 (positive rates 22–36 %), but keep the guard if you later sweep larger τ values where a small ticker's test set could end up all-zero.
+- **Task 4 trains no new models.** It reuses `results_vn_kday[(t, 7)]` (Task 2.3) and `results_vn_sell[t]` (Task 3.2). If you re-run the notebook from scratch, **Task 4 cells will fail until 2.3 and 3.2 have populated their result dicts.** No new `checkpoint_path` entries — there's nothing to save.
+- **Task 4 uses the 5ᵗʰ step of the k=7 multistep model**, not a dedicated h=5 single-output model. `predict_h_step_close` takes `h=5` and indexes `y_pred[:, 4]`. Don't re-train an h=5 head — the per-step RMSE table in §2.3 already validated step 5's behaviour.
+- **Task 4 test-window alignment loses 2 days per ticker** because Task 2.3's k=7 and Task 3.2's h=5 windowing produce slightly different test ranges. `ticker_test_frame` merges them on `Date` (inner join), so the resulting panel has ≤ both. For VCB that's 502 days out of 504 each side — a non-issue but expected.
+- **Cap is water-filled, not clipped.** `_row_weights` uses water-filling (cap a name, redistribute the leftover, repeat) — not "clip then renormalise". The latter loses mass when the redistribution can't continue (e.g. only one name has positive score after exclusion). Keep the water-filling logic; the smoke test failed without it.
+- **Weights stay fixed between rebalances.** `backtest` forward-fills the rebalance-day weights across daily returns until the next rebalance. This is deliberate — letting weights drift with returns is more realistic but adds another dimension to defend in the report, and it would not change the Sharpe ranking we care about.
+- **Risk score is cross-sectional, not absolute.** `compute_risk_panel` z-scores per **day** across tickers, then min-max per day. So `risk = 0` means "safest of today's six tickers" and `risk = 1` means "riskiest of today's six tickers" — not "objectively safe / risky". Don't interpret `risk = 1.0` as a vol bound; it's a relative rank.

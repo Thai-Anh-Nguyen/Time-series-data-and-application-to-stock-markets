@@ -48,6 +48,38 @@ constants:
     value: 0.02
     defined_in: "Task 3 helpers cell"
     note: "Task 3 fractional-return cutoff (|Close[t+h]/Close[t] − 1| > τ → positive class)."
+  PORTFOLIO_HORIZON:
+    value: 5
+    defined_in: "Task 4 helpers cell"
+    note: "Rebalance / forecast horizon in trading days; uses step 5 of the Task 2.3 k=7 multistep model."
+  VOL_WINDOW:
+    value: 20
+    defined_in: "Task 4 helpers cell"
+    note: "Window length for trailing realised volatility (std of daily returns)."
+  PRUDENT_LAMBDA:
+    value: 2.0
+    defined_in: "Task 4 helpers cell"
+    note: "Risk-penalty multiplier for the prudent investor (heavy)."
+  AGGRESSIVE_LAMBDA:
+    value: 0.5
+    defined_in: "Task 4 helpers cell"
+    note: "Risk-penalty multiplier for the aggressive investor (light)."
+  PRUDENT_WEIGHT_CAP:
+    value: 0.25
+    defined_in: "Task 4 helpers cell"
+    note: "Max single-name weight in the prudent portfolio."
+  AGGRESSIVE_WEIGHT_CAP:
+    value: 0.50
+    defined_in: "Task 4 helpers cell"
+    note: "Max single-name weight in the aggressive portfolio."
+  PRUDENT_EXCLUDE_TOP_K:
+    value: 1
+    defined_in: "Task 4 helpers cell"
+    note: "Number of riskiest names hard-excluded from the prudent portfolio each rebalance day."
+  PORTFOLIO_TRADING_DAYS:
+    value: 252
+    defined_in: "Task 4 helpers cell"
+    note: "Trading days per year used to annualise Sharpe and return."
 
 raw_dataframes:           # loaded straight from Nasdaq data/csv/<ticker>.csv
   AAPL:    {rows: 10590, defined_in: "cell 7ed3d11b"}
@@ -262,6 +294,35 @@ models:                   # all checkpointed under models/<task>/<name>.keras
     ckpt_pattern: "models/task3.2/<TICKER>_sell.keras"
     note: "Same structure as results_vn_buy. Direction='sell' flips the label condition."
 
+  # Task 4 — no new model checkpoints. Just derived panels and backtest outputs.
+  test_panel:
+    type: "dict[str, DataFrame]"
+    key: "ticker"
+    fields:
+      Date:              "pd.Timestamp — decision day = last day of input window"
+      Close:             "float — Close on decision day"
+      e_return:          "float — predicted 5-day return from Task 2.3 (k=7, step 5)"
+      realized_h_return: "float — realised 5-day return; used for backtest only, never in scoring"
+      rolling_vol:       "float — trailing 20-day std of daily Close returns at decision day"
+      p_sell:            "float — Task 3.2 sell probability at decision day"
+    keys_present: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 4 (build_test_panel call in §4.1 cell)"
+    note: "Per-ticker date set is the intersection of Task 2.3 (k=7) and Task 3.2 (h=5) test windows; differs by 2 dates per ticker — handled by an inner merge in ticker_test_frame."
+  risk_wide:
+    type: "DataFrame[date × ticker]"
+    defined_in: "Task 4 §4.2 cell"
+    note: "Cross-sectional risk in [0,1]: row min-max of (0.5·z(rolling_vol) + 0.5·z(p_sell)). High = riskier within the panel on that day."
+  portfolio_results:
+    type: "dict[str, dict]"
+    key: "profile  (one of 'prudent', 'aggressive', 'equal')"
+    fields:
+      nav:      "pd.Series — NAV indexed by daily dates, starts at 1.0"
+      returns:  "pd.Series — daily portfolio returns"
+      weights:  "DataFrame[decision_date × ticker] — weights at each rebalance day"
+      metrics:  "dict — {Annualised Return, Sharpe, Max Drawdown}"
+    defined_in: "Task 4 §4.3 backtest cell"
+    note: "Equal-weight is the benchmark; prudent / aggressive use the score-based weights."
+
 histories:
   history:
     type: "tf.keras.callbacks.History"
@@ -289,6 +350,19 @@ helpers:                  # function-name → defined_in
   build_lstm_classifier:         "Task 3 helpers cell — LSTM(64) → Dropout(0.2) → Dense(1, sigmoid); BCE loss; built-in metrics [accuracy, AUC, Precision, Recall]."
   tune_decision_threshold:       "Task 3 helpers cell — signature: (model, val_split, grid=None). Sweeps θ ∈ {0.05, …, 0.95} (default), returns θ maximising F1 (ties broken by precision)."
   evaluate_test_clf:             "Task 3 helpers cell — signature: (model, test_split, decision_threshold=0.5). Returns (y_true, y_prob, y_pred, metrics) with keys Accuracy, Precision, Recall, F1, ROC-AUC, threshold, pos_rate, pred_pos, CM."
+  predict_h_step_close:          "Task 4 helpers cell — signature: (model, test_split, h). Predicts → denormalises → returns 1-D array of the h-step-ahead Close. Used by ticker_test_frame for E[return]."
+  ticker_test_frame:             "Task 4 helpers cell — signature: (ticker, h=PORTFOLIO_HORIZON). Returns DataFrame[Date, Close, e_return, realized_h_return, rolling_vol, p_sell] over the test window. Merges Task 2.3 (k=7) and Task 3.2 (h=5) sides on Date (inner)."
+  build_test_panel:              "Task 4 helpers cell — returns {ticker → ticker_test_frame(ticker)} for every VN_TICKERS entry."
+  _wide:                         "Task 4 helpers cell — signature: (panel, col). Pivots one column across tickers into a wide DataFrame[date × ticker]."
+  _zrows:                        "Task 4 helpers cell — row z-score (cross-sectional across tickers, per day)."
+  compute_risk_panel:            "Task 4 helpers cell — signature: (panel). Returns DataFrame[date × ticker] of risk in [0,1]: row min-max of (0.5·z(vol) + 0.5·z(p_sell))."
+  compute_score:                 "Task 4 helpers cell — signature: (e_return_wide, risk_wide, lam). Returns E[return] − λ·risk; indices preserved."
+  _row_weights:                  "Task 4 helpers cell — water-filling weights for a single day. Signature: (score_row, exclude_set, weight_cap). Clips negatives → 0, caps names that would exceed the cap, redistributes leftover mass; always sums to 1 if cap·n_active ≥ 1."
+  build_weights:                 "Task 4 helpers cell — signature: (score_wide, risk_wide, weight_cap, exclude_top_k). Applies _row_weights per date; excludes the top-K riskiest names each day when exclude_top_k > 0."
+  equal_weights_like:            "Task 4 helpers cell — signature: (score_wide). Equal-weight benchmark DataFrame with the same index/columns."
+  daily_returns_calendar:        "Task 4 helpers cell — signature: (panel). Returns DataFrame[date × ticker] of raw daily Close-to-Close returns, used for NAV computation in backtest()."
+  backtest:                      "Task 4 helpers cell — signature: (weights, daily_returns, rebalance_every=PORTFOLIO_HORIZON). Walk-forward backtest; weights fixed between rebalances. Returns (nav, port_daily, active_weights)."
+  portfolio_metrics:             "Task 4 helpers cell — signature: (nav, port_daily, trading_days=252). Returns {Annualised Return, Sharpe, Max Drawdown}. Sharpe uses rf=0 and the std of port_daily."
 
 checkpoint_paths:         # everything that gets written to disk during a full notebook run
   task1.1:
@@ -367,3 +441,12 @@ checkpoint_paths:         # everything that gets written to disk during a full n
 # - To re-score a Task 3 model with stored θ:
 #       r = results_vn_buy['VCB']                   # or results_vn_sell[...]
 #       evaluate_test_clf(r['model'], r['test'], decision_threshold=r['threshold'])
+# - To rebuild Task 4 panels (no training; pure inference + math):
+#       test_panel = build_test_panel()
+#       risk_wide  = compute_risk_panel(test_panel)
+#       scores     = compute_score(_wide(test_panel, 'e_return'), risk_wide, PRUDENT_LAMBDA)
+# - To re-run a single profile of the backtest (after rebuilding panels):
+#       w   = build_weights(scores, risk_wide, PRUDENT_WEIGHT_CAP, PRUDENT_EXCLUDE_TOP_K)
+#       dr  = daily_returns_calendar(test_panel)
+#       nav, ret, _ = backtest(w, dr)
+#       portfolio_metrics(nav, ret)
