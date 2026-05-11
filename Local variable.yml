@@ -10,7 +10,7 @@ constants:
             daily_return, MA5, MA20, RSI, MACD, MACD_signal, volatility]
     n: 13
     defined_in: "cell 8151b94d (1.1)"
-    note: "Column order of the per-window feature tensor — must not change once windows are built."
+    note: "Column order of the per-window feature tensor for Task 1 (Nasdaq) — must not change once windows are built."
   LABEL_COL:
     value: "Adjusted Close"
     defined_in: "cell 8151b94d (1.1)"
@@ -20,10 +20,26 @@ constants:
   K_VALUES:
     value: [3, 7]
     defined_in: "cell fd9e01f9 (1.2)"
-    note: "Forecast horizons used in 1.2 (k = 1 is handled by 1.1)."
+    note: "Forecast horizons used in 1.2 / 1.3 / 2.2 / 2.3 (k = 1 is handled by 1.1 / 2.1)."
   MODELS_DIR:
     value: "Path('models')"
     defined_in: "cell 3f6164fb (checkpoint utilities)"
+  VN_FEATURE_COLS:
+    value: [Open, High, Low, Close, Volume,
+            daily_return, MA5, MA20, RSI, MACD, MACD_signal, volatility]
+    n: 12
+    defined_in: "Task 2.1 (Vietnam loading cell)"
+    note: "Column order of the per-window feature tensor for Task 2 (Vietnam) — no Adjusted Close column."
+  VN_LABEL_COL:
+    value: "Close"
+    defined_in: "Task 2.1 (Vietnam loading cell)"
+    note: "Vietnam CSVs have no Adjusted Close → label is raw Close. The pipeline is otherwise identical."
+  VN_TICKERS:
+    value: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 2.1 (Vietnam loading cell)"
+  VN_DATA_DIR:
+    value: "Path('Vietnam data/stock-historical-data')"
+    defined_in: "Task 2.1 (Vietnam loading cell)"
 
 raw_dataframes:           # loaded straight from Nasdaq data/csv/<ticker>.csv
   AAPL:    {rows: 10590, defined_in: "cell 7ed3d11b"}
@@ -34,11 +50,28 @@ raw_dataframes:           # loaded straight from Nasdaq data/csv/<ticker>.csv
     keys: [AAPL, MSFT, NVDA]
     defined_in: "cell fd9e01f9 (1.2)"
 
+vn_raw_dataframes:        # loaded via load_vietnam(t) from Vietnam data/stock-historical-data/<t>-VNINDEX-History.csv
+  VCB:     {rows: 3413, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  HPG:     {rows: 3809, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  FPT:     {rows: 4038, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  VNM:     {rows: 4264, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  MSN:     {rows: 3322, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  MWG:     {rows: 2157, defined_in: "Task 2.1 (Vietnam loading cell)"}
+  VN_RAW_FRAMES:
+    type: "dict[str, DataFrame]"
+    keys: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 2.1 (Vietnam loading cell)"
+    note: "load_vietnam(t) drops the leading unnamed index column and renames TradingDate → Date."
+
 feature_engineered_dataframes:  # output of add_technical_features(...).dropna()
   feat_aapl:
     cols: "raw + 7 engineered indicators + parsed Date"
     defined_in: "cell 57c2ae6c (used by AAPL plot)"
     used_by: ["1.1 AAPL plot", "1.2 AAPL plot"]
+  feat_vcb:
+    cols: "raw + 7 engineered indicators + parsed Date (no Adj Close)"
+    defined_in: "Task 2.1 (VCB split-boundary plot cell)"
+    used_by: ["2.1 VCB plot", "2.2 VCB plot", "2.3 VCB trajectory plot"]
   feat: "(local helper var in cell 25806c13 — split-boundary plot only)"
 
 splits:                   # output of build_pipeline → Split(X, y, label_min, label_max)
@@ -55,6 +88,19 @@ splits:                   # output of build_pipeline → Split(X, y, label_min, 
   SPLITS_K1:
     type: "dict[str, (train, val, test)]"
     defined_in: "cell 3a2b8653 (1.1 extension)"
+
+  # k = 1 (Task 2.1) — Vietnam splits. n_features = 12 (no Adj Close).
+  VN_SPLITS_K1:
+    type: "dict[str, (train, val, test)]"
+    keys: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 2.1 (pipeline cell)"
+    sizes:
+      VCB: "train (2353, 30, 12)  val (505, 30, 12)  test (505, 30, 12)"
+      HPG: "train (2631, 30, 12)  val (564, 30, 12)  test (564, 30, 12)"
+      FPT: "train (2790, 30, 12)  val (599, 30, 12)  test (599, 30, 12)"
+      VNM: "train (2949, 30, 12)  val (632, 30, 12)  test (633, 30, 12)"
+      MSN: "train (2290, 30, 12)  val (491, 30, 12)  test (491, 30, 12)"
+      MWG: "train (1474, 30, 12)  val (316, 30, 12)  test (317, 30, 12)"
 
 models:                   # all checkpointed under models/<task>/<name>.keras
   # Task 1.1 — k = 1
@@ -101,6 +147,58 @@ models:                   # all checkpointed under models/<task>/<name>.keras
     ckpt_pattern: "models/task1.3/<TICKER>_k<k>.keras"
     note: "Splits are MultiStepSplit (y has shape (N, k)). Models output a length-k vector."
 
+  # Task 2.1 — k = 1 × {VCB, HPG, FPT, VNM, MSN, MWG}; LSTM(64) → Dense(1) on 12 features
+  results_vn_k1:
+    type: "dict[str, dict]"
+    key: "ticker"
+    fields: [model, history, train, val, test]
+    keys_present: [VCB, HPG, FPT, VNM, MSN, MWG]
+    defined_in: "Task 2.1 (training loop cell)"
+    ckpt_pattern: "models/task2.1/<TICKER>_lstm.keras"
+
+  # Task 2.2 — k ∈ {3, 7} × {VCB, HPG, FPT, VNM, MSN, MWG}; same arch as 2.1
+  results_vn_kth:
+    type: "dict[tuple[str, int], dict]"
+    key: "(ticker, k)"
+    fields: [model, history, train, val, test]
+    keys_present:
+      - "('VCB', 3)"
+      - "('VCB', 7)"
+      - "('HPG', 3)"
+      - "('HPG', 7)"
+      - "('FPT', 3)"
+      - "('FPT', 7)"
+      - "('VNM', 3)"
+      - "('VNM', 7)"
+      - "('MSN', 3)"
+      - "('MSN', 7)"
+      - "('MWG', 3)"
+      - "('MWG', 7)"
+    defined_in: "Task 2.2 (training loop cell)"
+    ckpt_pattern: "models/task2.2/<TICKER>_k<k>.keras"
+
+  # Task 2.3 — k ∈ {3, 7} × {VCB, HPG, FPT, VNM, MSN, MWG}; Dense(k) head, vector label
+  results_vn_kday:
+    type: "dict[tuple[str, int], dict]"
+    key: "(ticker, k)"
+    fields: [model, history, train, val, test]
+    keys_present:
+      - "('VCB', 3)"
+      - "('VCB', 7)"
+      - "('HPG', 3)"
+      - "('HPG', 7)"
+      - "('FPT', 3)"
+      - "('FPT', 7)"
+      - "('VNM', 3)"
+      - "('VNM', 7)"
+      - "('MSN', 3)"
+      - "('MSN', 7)"
+      - "('MWG', 3)"
+      - "('MWG', 7)"
+    defined_in: "Task 2.3 (training loop cell)"
+    ckpt_pattern: "models/task2.3/<TICKER>_k<k>.keras"
+    note: "Splits are MultiStepSplit (y has shape (N, k)). Models output a length-k vector."
+
 histories:
   history:
     type: "tf.keras.callbacks.History"
@@ -108,19 +206,20 @@ histories:
     used_by: "training-curve plot (cell 8f054cbc)"
 
 helpers:                  # function-name → defined_in
-  add_technical_features:        "cell 6ce09c79"
-  build_pipeline:                "cell 8151b94d"
-  denormalize_label:             "cell 8151b94d"
+  add_technical_features:        "cell 6ce09c79 (reused by Task 1 + Task 2 pipelines unchanged)"
+  build_pipeline:                "cell 8151b94d — signature now: (df, name, window_size=30, horizon=1, val_ratio=0.15, test_ratio=0.15, verbose=True, feature_cols=None, label_col=None). Defaults to Nasdaq globals; Task 2 passes VN_FEATURE_COLS / VN_LABEL_COL."
+  denormalize_label:             "cell 8151b94d (Task 1 + Task 2)"
   Split (namedtuple):            "cell 8151b94d"
   checkpoint_path:               "cell 3f6164fb"
   train_with_checkpoint:         "cell 3f6164fb"
-  build_lstm:                    "cell 3a2b8653 (1.1 extension; reused by 1.2)"
-  evaluate_test:                 "cell 3a2b8653 (1.1 extension; reused by 1.2)"
-  MultiStepSplit (namedtuple):   "cell 99e59430 (1.3)"
-  build_pipeline_multistep:      "cell 99e59430 (1.3)"
-  build_lstm_multistep:          "cell 99e59430 (1.3)"
-  denormalize_label_multistep:   "cell 99e59430 (1.3)"
-  evaluate_test_multistep:       "cell 99e59430 (1.3)"
+  build_lstm:                    "cell 3a2b8653 (1.1 extension; reused by 1.2, 2.1, 2.2)"
+  evaluate_test:                 "cell 3a2b8653 (1.1 extension; reused by 1.2, 2.1, 2.2)"
+  MultiStepSplit (namedtuple):   "cell 99e59430 (1.3; reused by 2.3)"
+  build_pipeline_multistep:      "cell 99e59430 — signature now: (df, name, k, window_size=30, val_ratio=0.15, test_ratio=0.15, verbose=True, feature_cols=None, label_col=None). Defaults to Nasdaq globals; Task 2.3 passes VN_FEATURE_COLS / VN_LABEL_COL."
+  build_lstm_multistep:          "cell 99e59430 (1.3; reused by 2.3)"
+  denormalize_label_multistep:   "cell 99e59430 (1.3; reused by 2.3)"
+  evaluate_test_multistep:       "cell 99e59430 (1.3; reused by 2.3)"
+  load_vietnam:                  "Task 2.1 (Vietnam loading cell) — drops leading unnamed index column, renames TradingDate → Date, parses dates."
 
 checkpoint_paths:         # everything that gets written to disk during a full notebook run
   task1.1:
@@ -141,6 +240,39 @@ checkpoint_paths:         # everything that gets written to disk during a full n
     - models/task1.3/MSFT_k7.keras
     - models/task1.3/NVDA_k3.keras
     - models/task1.3/NVDA_k7.keras
+  task2.1:
+    - models/task2.1/VCB_lstm.keras
+    - models/task2.1/HPG_lstm.keras
+    - models/task2.1/FPT_lstm.keras
+    - models/task2.1/VNM_lstm.keras
+    - models/task2.1/MSN_lstm.keras
+    - models/task2.1/MWG_lstm.keras
+  task2.2:
+    - models/task2.2/VCB_k3.keras
+    - models/task2.2/VCB_k7.keras
+    - models/task2.2/HPG_k3.keras
+    - models/task2.2/HPG_k7.keras
+    - models/task2.2/FPT_k3.keras
+    - models/task2.2/FPT_k7.keras
+    - models/task2.2/VNM_k3.keras
+    - models/task2.2/VNM_k7.keras
+    - models/task2.2/MSN_k3.keras
+    - models/task2.2/MSN_k7.keras
+    - models/task2.2/MWG_k3.keras
+    - models/task2.2/MWG_k7.keras
+  task2.3:
+    - models/task2.3/VCB_k3.keras
+    - models/task2.3/VCB_k7.keras
+    - models/task2.3/HPG_k3.keras
+    - models/task2.3/HPG_k7.keras
+    - models/task2.3/FPT_k3.keras
+    - models/task2.3/FPT_k7.keras
+    - models/task2.3/VNM_k3.keras
+    - models/task2.3/VNM_k7.keras
+    - models/task2.3/MSN_k3.keras
+    - models/task2.3/MSN_k7.keras
+    - models/task2.3/MWG_k3.keras
+    - models/task2.3/MWG_k7.keras
 
 # Debugging cheat-sheet
 # --------------------

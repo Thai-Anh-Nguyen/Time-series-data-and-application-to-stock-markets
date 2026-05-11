@@ -16,6 +16,9 @@ Quick links: [variable namespace map](Local%20variable.yml) · [checkpoints fold
 | `### 1.1 extension — apply the same pipeline to MSFT and NVDA` | [§1.1.h Multi-ticker extension](#11h-multi-ticker-extension) |
 | `1.2 kᵗʰ day forecast` | [§1.2 kᵗʰ-day-ahead forecast](#12-kᵗʰ-day-ahead-forecast) |
 | `1.3 k consecutive days forecast` | [§1.3 k consecutive days forecast](#13-k-consecutive-days-forecast) |
+| `# TASK 2` → `2.1 Vietnam multi-feature next-day forecast` | [§2.1 Vietnam next-day forecast (6 tickers)](#21-vietnam-next-day-forecast) |
+| `2.2 Vietnam kᵗʰ day forecast` | [§2.2 Vietnam kᵗʰ-day-ahead forecast](#22-vietnam-kᵗʰ-day-ahead-forecast) |
+| `2.3 Vietnam k consecutive days forecast` | [§2.3 Vietnam k consecutive days forecast](#23-vietnam-k-consecutive-days-forecast) |
 
 ---
 
@@ -378,21 +381,90 @@ MSFT and NVDA are intentionally not plotted — the per-step table already shows
 
 ---
 
+## 2.1 Vietnam next-day forecast
+
+**Goal (from the spec):** mirror Task 1 on the Vietnam stock dataset — multi-feature input, recurrent architecture, multiple tickers — instead of the Nasdaq one.
+
+### 2.1.a Ticker set (6 large-cap HOSE names)
+
+| Ticker | Sector | Rows | Date range (approx.) |
+|---|---|---|---|
+| VCB | Banking | 3 413 | 2009-06 — present |
+| HPG | Steel / industrials | 3 809 | 2007-11 — present |
+| FPT | Technology | 4 038 | 2006-12 — present |
+| VNM | Consumer staples (dairy) | 4 264 | 2006-01 — present |
+| MSN | Consumer / retail conglomerate | 3 322 | 2009-11 — present |
+| MWG | Tech retail | 2 157 | 2014-07 — present |
+
+These were chosen for **breadth of sector coverage** and **history depth**: all have ≥ 2 100 trading days, enough to keep the same 70 / 15 / 15 split (smallest, MWG, still yields ~1 500 train windows).
+
+### 2.1.b Pipeline differences vs Task 1
+
+The Vietnam CSVs have a different schema than the Nasdaq ones, but the *pipeline* is structurally identical — we thread the per-dataset feature/label column lists through the same `build_pipeline` / `build_pipeline_multistep` helpers (which now take optional `feature_cols=` / `label_col=` kwargs). Task 1 cells call without kwargs and default to the Nasdaq globals; Task 2 cells pass `VN_FEATURE_COLS` / `VN_LABEL_COL`.
+
+| Aspect | Task 1 (Nasdaq) | Task 2 (Vietnam) |
+|---|---|---|
+| Raw columns | `Date, Low, Open, Volume, High, Close, Adjusted Close` | `Open, High, Low, Close, Volume, TradingDate` (+ leading unnamed index) |
+| Date format | `dd-mm-yyyy` strings | `yyyy-mm-dd` strings |
+| Label column | `Adjusted Close` | `Close` (no Adj Close exists for Vietnam) |
+| Feature count | 13 (OHLCV + Adj Close + 7 indicators) | 12 (OHLCV + 7 indicators) |
+| Window size | 30 | 30 |
+| Split | 70 / 15 / 15, chronological | identical |
+| Per-window MinMax | yes (using Adj Close stats for the label) | yes (using `Close` stats for the label) |
+| Model | `LSTM(64) → Dense(1)` | identical (`build_lstm` reused as-is) |
+| Optimiser / loss / epochs / batch | Adam / MSE / 10 / 64 | identical |
+| Checkpoint subdir | `models/task1.1/` | `models/task2.1/` |
+
+The single Vietnam-specific helper is `load_vietnam(ticker)` — it reads the CSV, drops the leading unnamed index column, renames `TradingDate → Date`, and parses the date. `add_technical_features` then works on the renamed frame without modification (it already auto-detects already-parsed datetime columns).
+
+### 2.1.c Training & evaluation
+
+The 2.1 training cell loops over `VN_TICKERS` and trains an LSTM per ticker. `results_vn_k1[ticker]` is the `dict[ticker → {model, history, train, val, test}]` mirror of `results_k1`.
+
+The **cross-ticker comparison table** uses `evaluate_test` unchanged — the metric dict's keys still say `'MSE ($²)'` / `'RMSE ($)'` etc., but for the Vietnam table we relabel them as VND in the print headers (no `evaluate_test` change is required; the dict values are unit-agnostic). The dollar-style metrics aren't comparable across tickers (VCB trades ~80–100 k VND, MWG ~30–60 k VND, etc.); the **normalised MSE** is.
+
+### 2.1.d Plotting strategy
+
+Per the same logic as Task 1.1.h ("MSFT/NVDA not plotted; table covers them"), only **VCB** gets a predicted-vs-real Close plot. The split-boundary visualisation is also VCB only.
+
+---
+
+## 2.2 Vietnam kᵗʰ-day-ahead forecast
+
+Mirrors Task 1.2. `build_pipeline(..., horizon=k)` is reused; only the value of `k` and the checkpoint subdir change (`models/task2.2/`). We train at **k ∈ {3, 7}** for all 6 tickers, store results in `results_vn_kth[(ticker, k)]`, and print a unified k ∈ {1, 3, 7} table.
+
+The k = 1 row in the table comes from `results_vn_k1[ticker]`; k ∈ {3, 7} rows from `results_vn_kth[(ticker, k)]`. As with Nasdaq, total windows shrink by `k − 1` per (ticker, k) pipeline — negligible — but the **plot's date offset** must still come from each `(ticker, k)`'s own `r['train']` / `r['val']` rather than reusing 2.1's sizes.
+
+Only VCB is plotted (two panels for k = 3 and k = 7); the table covers the cross-ticker comparison.
+
+---
+
+## 2.3 Vietnam k consecutive days forecast
+
+Mirrors Task 1.3. `build_pipeline_multistep(..., k=k)` is reused with `feature_cols=VN_FEATURE_COLS, label_col=VN_LABEL_COL`. The model head becomes `Dense(k)`; everything else stays the same. Results live in `results_vn_kday[(ticker, k)]` (kept separate from `results_kday` so Task 1 and Task 2 don't trample each other).
+
+The relevant report artifact remains the **per-step RMSE/MAE** array — step-1 RMSE should be close to that ticker's 2.1 (k=1) baseline, step-k RMSE close to that ticker's 2.2 (k=k) single-day-ahead forecast, intermediate steps interpolate.
+
+VCB k = 7 gets a six-panel trajectory plot at evenly-spaced starting dates from the test set. Same offset trap as 1.3: `first_label_offset = window_size` (no `+ k − 1`) for trajectory plots.
+
+---
+
 ## Reusable helpers — quick reference
 
 | Function | Defined in cell | Used by |
 |---|---|---|
-| `add_technical_features(df)` | 1.1 (feature cell) | 1.1 pipeline, 1.2 pipeline, plotting cells |
-| `build_pipeline(df, name, window_size=30, horizon=1, val_ratio=0.15, test_ratio=0.15)` | 1.1 (pipeline cell) | 1.1 (called 3× for AAPL/MSFT/NVDA), 1.2 (called per (ticker, k)) |
-| `denormalize_label(y_norm, label_min, label_max)` | 1.1 (pipeline cell) | 1.1 evaluation, `evaluate_test` |
+| `add_technical_features(df)` | 1.1 (feature cell) | 1.1 / 1.2 / 1.3 pipelines, 2.1 / 2.2 / 2.3 pipelines, plotting cells |
+| `build_pipeline(df, name, window_size=30, horizon=1, val_ratio=0.15, test_ratio=0.15, feature_cols=None, label_col=None)` | 1.1 (pipeline cell) | 1.1 (3× Nasdaq), 1.2 (per (ticker, k)), 2.1 / 2.2 (Vietnam — passes `VN_FEATURE_COLS`/`VN_LABEL_COL`) |
+| `denormalize_label(y_norm, label_min, label_max)` | 1.1 (pipeline cell) | 1.1 / 2.1 evaluation, `evaluate_test` |
 | `checkpoint_path(task, name)` | checkpoint utilities | every training cell — builds `models/<task>/<name>.keras` |
 | `train_with_checkpoint(model, train, val, save_path, ...)` | checkpoint utilities | every training cell — wraps `model.fit` with `ModelCheckpoint` |
-| `build_lstm(input_shape)` | 1.1 extension | 1.1 MSFT/NVDA training, 1.2 training loop |
-| `evaluate_test(model, test)` | 1.1 extension | 1.1 cross-ticker table, 1.2 comparison table & AAPL plot |
-| `build_pipeline_multistep(df, name, k, ...)` | 1.3 helpers | 1.3 training loop |
-| `build_lstm_multistep(input_shape, k)` | 1.3 helpers | 1.3 training loop |
+| `build_lstm(input_shape)` | 1.1 extension | 1.1 MSFT/NVDA training, 1.2 training loop, 2.1 / 2.2 training loops |
+| `evaluate_test(model, test)` | 1.1 extension | 1.1 / 1.2 / 2.1 / 2.2 comparison tables & VCB / AAPL plots |
+| `build_pipeline_multistep(df, name, k, ..., feature_cols=None, label_col=None)` | 1.3 helpers | 1.3 training loop, 2.3 training loop |
+| `build_lstm_multistep(input_shape, k)` | 1.3 helpers | 1.3 / 2.3 training loops |
 | `denormalize_label_multistep(...)` | 1.3 helpers | `evaluate_test_multistep` |
-| `evaluate_test_multistep(model, test)` | 1.3 helpers | 1.3 per-step table & AAPL trajectory plot |
+| `evaluate_test_multistep(model, test)` | 1.3 helpers | 1.3 / 2.3 per-step tables & AAPL / VCB trajectory plots |
+| `load_vietnam(ticker)` | 2.1 (Vietnam loading) | builds the 6 entries of `VN_RAW_FRAMES`; drops the leading unnamed index column, renames `TradingDate → Date`, parses dates |
 
 For the full list of variable names (split shapes, dict keys, helper signatures, every checkpoint path) see [Local variable.yml](Local%20variable.yml).
 
@@ -406,10 +478,13 @@ For the full list of variable names (split shapes, dict keys, helper signatures,
 - **Compare across tickers in normalised units, not dollars.** NVDA's price range is much tighter than AAPL's, so equal-skill models will produce very different dollar errors. The `MSE (norm)` column is the right axis for cross-ticker comparison.
 - **Reload after checkpointing.** Every training cell calls `train_with_checkpoint(...)` and then `model = load_model(...)`. The reload is **not optional** — without it, `model` is the **last-epoch** weights, but the checkpoint on disk is the **best-by-val-loss** weights. Skipping the reload means downstream evaluation cells use a different model than the one persisted to disk.
 - **Dict-key conventions:**
-  - `results_k1[ticker]` — string key, holds the k=1 model and its train/val/test.
-  - `results_kth[(ticker, k)]` — tuple key, holds 1.2's single-day-ahead models. `.y` is scalar.
-  - `results_kday[(ticker, k)]` — tuple key, holds 1.3's multi-step models. `.y` is a vector of length k. The three dicts are kept separate (rather than merged) so each task stays self-contained.
+  - `results_k1[ticker]` — string key, holds the Nasdaq k=1 model and its train/val/test.
+  - `results_kth[(ticker, k)]` — tuple key, holds Nasdaq 1.2's single-day-ahead models. `.y` is scalar.
+  - `results_kday[(ticker, k)]` — tuple key, holds Nasdaq 1.3's multi-step models. `.y` is a vector of length k.
+  - `results_vn_k1[ticker]` / `results_vn_kth[(ticker, k)]` / `results_vn_kday[(ticker, k)]` — Vietnam mirrors of the above. The six dicts are kept separate (rather than merged) so each task stays self-contained — a Vietnam ticker name colliding with a Nasdaq one (e.g., none do today, but they could) wouldn't be ambiguous.
 - **1.3 plot offset.** The 1.3 trajectory plot's date offset is `test_start_idx + window_size` (the **first** of the k predicted days). Do **not** add `+ k − 1` — that's the offset for 1.2's plot, which targets only the **kᵗʰ** day.
-- **Don't rename load-bearing variables.** `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `results_kday`, `MODELS_DIR` are all referenced by later cells. Renaming them silently will break downstream evaluation/plotting cells. See [Local variable.yml](Local%20variable.yml) for the full list.
-- **Date offset for plotting test labels:** `test_start_idx + window_size + k − 1`, where `test_start_idx = N_train + N_val`. Use the **per-(ticker, k) pipeline's own** train/val sizes (from `results_kth[(ticker, k)]['train']` and `['val']`), not the 1.1 split sizes — total windows shrink slightly as k grows.
-- **No redundant per-ticker plots.** The notebook only plots predicted-vs-real for AAPL — MSFT and NVDA appear only in the comparison tables. This is deliberate: tables convey "how well did each ticker do", and adding the same plot N times only pads the report without adding insight.
+- **Don't rename load-bearing variables.** Task 1: `AAPL_train`, `AAPL_val`, `AAPL_test`, `AAPL_LSTM_model`, `MSFT_LSTM_model`, `NVDA_LSTM_model`, `feat_aapl`, `K_VALUES`, `TICKERS`, `SPLITS_K1`, `RAW_FRAMES`, `results_k1`, `results_kth`, `results_kday`, `MODELS_DIR`. Task 2: `VN_TICKERS`, `VN_DATA_DIR`, `VN_FEATURE_COLS`, `VN_LABEL_COL`, `VN_RAW_FRAMES`, `VN_SPLITS_K1`, `feat_vcb`, `results_vn_k1`, `results_vn_kth`, `results_vn_kday`. All are referenced by later cells. See [Local variable.yml](Local%20variable.yml) for the full list.
+- **Date offset for plotting test labels:** `test_start_idx + window_size + k − 1`, where `test_start_idx = N_train + N_val`. Use the **per-(ticker, k) pipeline's own** train/val sizes (from `results_kth[(ticker, k)]['train']` / `results_vn_kth[(ticker, k)]['train']` and `['val']`), not the 2.1 / 1.1 split sizes — total windows shrink slightly as k grows.
+- **No redundant per-ticker plots.** Task 1 plots predicted-vs-real for AAPL only; Task 2 for VCB only. The other tickers appear in the comparison tables. Tables convey "how well did each ticker do"; mirroring the same plot N times pads the report without adding insight.
+- **Vietnam vs Nasdaq pipeline parity.** The pipeline helpers `build_pipeline` and `build_pipeline_multistep` accept optional `feature_cols=` / `label_col=` kwargs. When `None` (Task 1 call sites), they default to the Nasdaq globals (`FEATURE_COLS` / `LABEL_COL`). Task 2 call sites pass `VN_FEATURE_COLS` / `VN_LABEL_COL`. Don't drop these kwargs from Vietnam calls — silently using the Nasdaq globals would try to read an `Adjusted Close` column that doesn't exist on Vietnam frames and raise a KeyError mid-pipeline.
+- **VND vs $ metric labels.** `evaluate_test` / `evaluate_test_multistep` return dicts with keys named `'MSE ($²)'`, `'RMSE ($)'`, `'MAE ($)'`. These names are historical (from Task 1); the *values* are in whatever unit the label column uses (USD for Nasdaq, VND for Vietnam). The Task 2 print cells relabel them as VND in the table headers; don't try to "fix" the dict keys downstream — it would break Task 1 cells.
